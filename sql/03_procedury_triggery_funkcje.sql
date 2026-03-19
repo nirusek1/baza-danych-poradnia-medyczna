@@ -55,20 +55,14 @@ IF NOT EXISTS (
     FROM Wizyta
     WHERE WizytaID = @WizytaID
 )
-BEGIN
-    RAISERROR('Wizyta o podanym ID nie istnieje.',16,1);
-    RETURN;
-END;
+    THROW 50001, 'Wizyta o podanym ID nie istnieje.', 1;
 
 IF EXISTS (
     SELECT 1
     FROM Platnosc
     WHERE WizytaID = @WizytaID
 )
-BEGIN
-    RAISERROR('Platnosc dla tej wizyty juz istnieje.',16,1);
-    RETURN;
-END;
+    THROW 50002, 'Platnosc dla tej wizyty juz istnieje.', 1;
 
 INSERT INTO Platnosc (WizytaID, Kwota, DataPlatnosci)
 SELECT 
@@ -121,28 +115,16 @@ IF EXISTS (
     FROM Pacjent
     WHERE PESEL = @PESEL
 )
-BEGIN
-    RAISERROR('Pacjent z podanym numerem PESEL już istnieje.',16,1);
-    RETURN;
-END;
+    THROW 50003, 'Pacjent z podanym numerem PESEL juz istnieje.', 1;
 
 IF @Plec NOT IN ('K','M')
-BEGIN
-    RAISERROR('Niepoprawna wartość pola Plec. Dozwolone: K lub M.',16,1);
-    RETURN;
-END;
+    THROW 50004, 'Niepoprawna wartosc pola Plec.', 1;
 
 IF @DataUrodzenia > DATEADD(YEAR,-18,GETDATE())
-BEGIN
-    RAISERROR('Pacjent musi mieć co najmniej 18 lat.',16,1);
-    RETURN;
-END;
+    THROW 50005, 'Pacjent musi miec co najmniej 18 lat.', 1;
 
 IF @Telefon IS NULL AND @Email IS NULL
-BEGIN
-    RAISERROR('Należy podać przynajmniej telefon lub email.',16,1);
-    RETURN;
-END;
+    THROW 50006, 'Nalezy podac przynajmniej telefon lub email.', 1;
 
 INSERT INTO Pacjent
 (Imie, Nazwisko, PESEL, DataUrodzenia, Plec, Adres, Telefon, Email)
@@ -182,26 +164,17 @@ IF NOT EXISTS (
     FROM Pacjent
     WHERE PacjentID = @PacjentID
 )
-BEGIN
-    RAISERROR('Pacjent nie istnieje.',16,1);
-    RETURN;
-END;
+    THROW 50007, 'Pacjent o podanym ID nie istnieje.', 1;
 
 IF NOT EXISTS (
     SELECT 1
     FROM Lekarz
     WHERE LekarzID = @LekarzID
 )
-BEGIN
-    RAISERROR('Lekarz nie istnieje.',16,1);
-    RETURN;
-END;
+    THROW 50008, 'Lekarz o podanym ID nie istnieje.', 1;
 
 IF @DataWizyty < GETDATE()
-BEGIN
-    RAISERROR('Nieprawidłowa data wizyty.',16,1);
-    RETURN;
-END;
+    THROW 50009, 'Nieprawidłowa data wizyty.', 1;
 
 IF EXISTS (
     SELECT 1
@@ -209,10 +182,7 @@ IF EXISTS (
     WHERE LekarzID = @LekarzID
       AND DataWizyty = @DataWizyty
 )
-BEGIN
-    RAISERROR('Lekarz ma juz zaplanowana wizyte w tym terminie.',16,1);
-    RETURN;
-END;
+    THROW 50010, 'Lekarz ma juz zaplanowana wizyte w tym terminie.', 1;
 
 INSERT INTO Wizyta
 (PacjentID, LekarzID, DataWizyty, DataUtworzenia, StatusWizytyID, StatusPlatnosciID, TypWizytyID)
@@ -256,10 +226,7 @@ IF NOT EXISTS (
     FROM Wizyta
     WHERE WizytaID = @WizytaID
 )
-BEGIN
-    RAISERROR('Wizyta nie istnieje.',16,1);
-    RETURN;
-END;
+    THROW 50001, 'Wizyta o podanym ID nie istnieje.', 1;
 
 IF EXISTS (
     SELECT 1
@@ -267,10 +234,7 @@ IF EXISTS (
     WHERE WizytaID = @WizytaID
       AND StatusWizytyID = 2
 )
-BEGIN
-    RAISERROR('Nie mozna anulowac wizyty zrealizowanej.',16,1);
-    RETURN;
-END;
+    THROW 50011, 'Nie mozna anulowac wizyty zrealizowanej.', 1;
 
 IF EXISTS (
     SELECT 1
@@ -278,10 +242,7 @@ IF EXISTS (
     WHERE WizytaID = @WizytaID
       AND StatusWizytyID = 3
 )
-BEGIN
-    RAISERROR('Wizyta jest juz anulowana.',16,1);
-    RETURN;
-END;
+    THROW 50012, 'Wizyta jest juz anulowana.', 1;
 
 UPDATE Wizyta
 SET
@@ -319,10 +280,7 @@ IF NOT EXISTS (
     FROM Lekarz
     WHERE LekarzID = @LekarzID
 )
-BEGIN
-    RAISERROR('Lekarz o podanym ID nie istnieje.',16,1);
-    RETURN;
-END;
+    THROW 50008, 'Lekarz o podanym ID nie istnieje.', 1;
 
 SELECT
     CASE
@@ -359,10 +317,7 @@ IF NOT EXISTS (
     FROM Pacjent
     WHERE PacjentID = @PacjentID
 )
-BEGIN
-    RAISERROR('Pacjent o podanym ID nie istnieje.',16,1);
-    RETURN;
-END;
+    THROW 50007, 'Pacjent o podanym ID nie istnieje.', 1;
 
 SELECT *
 FROM vw_HistoriaWizytPacjenta
@@ -425,10 +380,7 @@ IF NOT EXISTS (
     FROM Lekarz
     WHERE LekarzID = @LekarzID
 )
-BEGIN
-    RAISERROR('Lekarz o podanym ID nie istnieje.',16,1);
-    RETURN;
-END;
+    THROW 50008, 'Lekarz o podanym ID nie istnieje.', 1;
 
 SELECT
     COUNT(*) AS LiczbaWizyt,
@@ -546,9 +498,7 @@ BEGIN
            AND s.ICD10ID = i.ICD10ID
         WHERE s.ICD10ID IS NULL
     )
-    BEGIN
-        THROW 50001, 'ICD10 niezgodne ze specjalizacją lekarza.', 1;
-    END
+        THROW 50013, 'Kod ICD10 jest niezgodny ze specjalizacja lekarza.', 1;
 END;
 
 
@@ -573,7 +523,5 @@ BEGIN
         JOIN Wizyta w ON i.WizytaID = w.WizytaID
         WHERE w.StatusWizytyID <> 2
     )
-    BEGIN
-        THROW 50001, 'Diagnoza tylko dla wizyty zrealizowanej.',1;
-    END
+        THROW 50014, 'Diagnoza moze byc dodana tylko dla wizyty zrealizowanej.', 1;
 END;

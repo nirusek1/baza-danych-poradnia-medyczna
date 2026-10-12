@@ -2,122 +2,276 @@
 ====================================================================
 PLIK: 05_zapytania_analityczne.sql
 
-Zestaw zapytań analitycznych wykorzystywanych do:
-- weryfikacji danych operacyjnych
-- analizy działalności poradni
-- przygotowania raportów statystycznych
+ZAKRES: Kontrola spójności, analiza wizyt, rozpoznań i finansów.
+Okres analityczny: @DataOd włącznie, @DataDo wyłącznie.
 ====================================================================
 */
 
+USE PoradniaDB;
+GO
 
--- ZAPYTANIE: liczba wizyt
+DECLARE @DataOd DATE = '20250101';
+DECLARE @DataDo DATE = '20250701';   -- górna granica wyłączna
+
+
+
+/*
+====================================================================
+I. WERYFIKACJA SPÓJNOŚCI DANYCH
+====================================================================
+*/
+
+-- Liczba wizyt, diagnoz i płatności bez filtra daty.
 SELECT
-    COUNT(*) AS LiczbaWizyt
-FROM vw_FactWizyty;
+    (SELECT COUNT(*) FROM Wizyta) AS LiczbaWizyt,
+    (SELECT COUNT(*) FROM Diagnoza) AS LiczbaDiagnoz,
+    (SELECT COUNT(*) FROM Platnosc) AS LiczbaPlatnosci;
 
 
--- ZAPYTANIE: miesięczna liczba wizyt
+-- Liczba wykrytych naruszeń w poszczególnych widokach kontrolnych.
+-- Oczekiwany wynik dla poprawnego zbioru testowego: 0 w każdym wierszu.
 SELECT
-    Rok,
-    Miesiac,
+    N'Zrealizowana wizyta bez diagnozy' AS Kontrola,
+    COUNT(*) AS LiczbaBledow
+FROM vw_WizytaBezDiagnozy
+
+UNION ALL
+
+SELECT
+    N'Zrealizowana wizyta bez płatności',
+    COUNT(*)
+FROM vw_WizytaBezPlatnosci
+
+UNION ALL
+
+SELECT
+    N'Więcej niż jedna wizyta pacjenta w miesiącu',
+    COUNT(*)
+FROM vw_WiecejNiz1Wizyta
+
+UNION ALL
+
+SELECT
+    N'Niespójność statusu wizyty i płatności',
+    COUNT(*)
+FROM vw_NiespojnoscStatusow
+
+UNION ALL
+
+SELECT
+    N'Płatność niezgodna z cennikiem',
+    COUNT(*)
+FROM vw_PlatnoscNiezgodnaZCennikiem;
+
+
+
+/*
+====================================================================
+II. ANALIZA WIZYT
+====================================================================
+*/
+
+-- Wizyty według statusów, bez ograniczenia dat.
+-- Uwzględnia również przyszłe wizyty umówione na lipiec.
+SELECT
+    StatusWizytyID,
+    StatusWizyty,
     COUNT(*) AS LiczbaWizyt
 FROM vw_FactWizyty
 GROUP BY
-    Rok,
-    Miesiac
+    StatusWizytyID,
+    StatusWizyty
+ORDER BY
+    StatusWizytyID;
+
+
+-- Zrealizowane wizyty według miesiąca DataWizyty.
+SELECT
+    YEAR(DataWizyty) AS Rok,
+    MONTH(DataWizyty) AS Miesiac,
+    COUNT(*) AS LiczbaZrealizowanychWizyt
+FROM vw_FactWizyty
+WHERE StatusWizytyID = 2
+  AND DataWizyty >= @DataOd
+  AND DataWizyty < @DataDo
+GROUP BY
+    YEAR(DataWizyty),
+    MONTH(DataWizyty)
 ORDER BY
     Rok,
     Miesiac;
 
 
--- ZAPYTANIE: liczba wizyt według typu wizyty
+-- Liczba i udział procentowy zrealizowanych wizyt według typu.
 SELECT
     TypWizyty,
-    COUNT(*) AS LiczbaWizyt
+    COUNT(*) AS LiczbaWizyt,
+    CAST(
+        100.0 * COUNT(*) / SUM(COUNT(*)) OVER ()
+        AS DECIMAL(5,2)
+    ) AS UdzialProcentowy
 FROM vw_FactWizyty
-GROUP BY TypWizyty
-ORDER BY LiczbaWizyt DESC;
-
-
--- ZAPYTANIE: przychody poradni według miesięcy
-SELECT
-    Rok,
-    Miesiac,
-    SUM(Kwota) AS Przychod
-FROM vw_FactWizyty
+WHERE StatusWizytyID = 2
+  AND DataWizyty >= @DataOd
+  AND DataWizyty < @DataDo
 GROUP BY
-    Rok,
-    Miesiac
+    TypWizyty
 ORDER BY
-    Rok,
-    Miesiac;
+    LiczbaWizyt DESC;
 
 
--- ZAPYTANIE: przychód generowany przez lekarzy
+-- Liczba i udział procentowy wizyt według specjalizacji.
 SELECT
+    SpecjalizacjaID,
+    Specjalizacja,
+    COUNT(*) AS LiczbaWizyt,
+    CAST(
+        100.0 * COUNT(*) / SUM(COUNT(*)) OVER ()
+        AS DECIMAL(5,2)
+    ) AS UdzialProcentowy
+FROM vw_FactWizyty
+WHERE StatusWizytyID = 2
+  AND DataWizyty >= @DataOd
+  AND DataWizyty < @DataDo
+GROUP BY
+    SpecjalizacjaID,
+    Specjalizacja
+ORDER BY
+    LiczbaWizyt DESC;
+
+
+-- Wolumen zrealizowanych wizyt według lekarza (bez czasu pracy).
+SELECT
+    LekarzID,
     LekarzImie,
     LekarzNazwisko,
-    SUM(Kwota) AS Przychod
+    COUNT(*) AS LiczbaZrealizowanychWizyt
 FROM vw_FactWizyty
-WHERE Kwota IS NOT NULL
+WHERE StatusWizytyID = 2
+  AND DataWizyty >= @DataOd
+  AND DataWizyty < @DataDo
 GROUP BY
+    LekarzID,
     LekarzImie,
     LekarzNazwisko
-ORDER BY Przychod DESC;
-
-
--- ZAPYTANIE: lekarze o największym obłożeniu
-SELECT
-    LekarzImie,
+ORDER BY
+    LiczbaZrealizowanychWizyt DESC,
     LekarzNazwisko,
-    COUNT(*) AS LiczbaWizyt
-FROM vw_FactWizyty
+    LekarzImie;
+
+
+-- Dziesięciu pacjentów z największą liczbą zrealizowanych wizyt.
+SELECT TOP (10)
+    f.PacjentID,
+    p.Imie,
+    p.Nazwisko,
+    COUNT(*) AS LiczbaZrealizowanychWizyt
+FROM vw_FactWizyty f
+JOIN Pacjent p
+    ON p.PacjentID = f.PacjentID
+WHERE f.StatusWizytyID = 2
+  AND f.DataWizyty >= @DataOd
+  AND f.DataWizyty < @DataDo
 GROUP BY
-    LekarzImie,
-    LekarzNazwisko
-ORDER BY LiczbaWizyt DESC;
+    f.PacjentID,
+    p.Imie,
+    p.Nazwisko
+ORDER BY
+    LiczbaZrealizowanychWizyt DESC,
+    p.Nazwisko,
+    p.Imie;
 
 
--- ZAPYTANIE: najczęstsze diagnozy ICD-10
+-- Liczba i udział wizyt według płci pacjenta.
 SELECT
+    Plec,
+    COUNT(*) AS LiczbaWizyt,
+    CAST(
+        100.0 * COUNT(*) / SUM(COUNT(*)) OVER ()
+        AS DECIMAL(5,2)
+    ) AS UdzialProcentowy
+FROM vw_FactWizyty
+WHERE StatusWizytyID = 2
+  AND DataWizyty >= @DataOd
+  AND DataWizyty < @DataDo
+GROUP BY
+    Plec
+ORDER BY
+    Plec;
+
+
+
+/*
+====================================================================
+III. ANALIZA KLINICZNA
+====================================================================
+*/
+
+-- Dziesięć najczęściej występujących rozpoznań ICD-10
+-- w zrealizowanych wizytach, według daty wizyty.
+SELECT TOP (10)
+    KodICD10,
     NazwaICD10,
     COUNT(*) AS LiczbaWystapien
 FROM vw_FactWizyty
-WHERE KodICD10 IS NOT NULL
-GROUP BY NazwaICD10
-ORDER BY LiczbaWystapien DESC;
-
-
--- ZAPYTANIE: pacjenci z największą liczbą wizyt
-SELECT
-    PacjentImie,
-    PacjentNazwisko,
-    COUNT(*) AS LiczbaWizyt
-FROM vw_FactWizyty
+WHERE StatusWizytyID = 2
+  AND DataWizyty >= @DataOd
+  AND DataWizyty < @DataDo
+  AND KodICD10 IS NOT NULL
 GROUP BY
-    PacjentImie,
-    PacjentNazwisko
-ORDER BY LiczbaWizyt DESC;
+    KodICD10,
+    NazwaICD10
+ORDER BY
+    LiczbaWystapien DESC,
+    KodICD10;
 
 
--- ZAPYTANIE: rozkład wizyt według płci pacjentów
+
+/*
+====================================================================
+IV. ANALIZA FINANSOWA
+====================================================================
+*/
+
+-- Przychód miesięczny według DataPlatnosci.
+-- Tylko płatności dotyczące wizyt zrealizowanych;
+-- przedpłaty za wizyty później wykonane poza okresem nie są liczone.
 SELECT
-    Plec,
-    COUNT(*) AS LiczbaWizyt
+    YEAR(DataPlatnosci) AS Rok,
+    MONTH(DataPlatnosci) AS Miesiac,
+    SUM(Kwota) AS Przychod
 FROM vw_FactWizyty
-GROUP BY Plec;
-
-
--- ZAPYTANIE: wizyty bez diagnozy
-SELECT
-    CASE
-        WHEN KodICD10 IS NULL THEN 'Brak diagnozy'
-        ELSE 'Z diagnozą'
-    END AS StatusDiagnozy,
-    COUNT(DISTINCT WizytaID) AS LiczbaWizyt
-FROM vw_FactWizyty
+WHERE StatusWizytyID = 2
+  AND DataPlatnosci >= @DataOd
+  AND DataPlatnosci < @DataDo
+  AND Kwota IS NOT NULL
 GROUP BY
-    CASE
-        WHEN KodICD10 IS NULL THEN 'Brak diagnozy'
-        ELSE 'Z diagnozą'
-    END;
+    YEAR(DataPlatnosci),
+    MONTH(DataPlatnosci)
+ORDER BY
+    Rok,
+    Miesiac;
+
+
+-- Wartość usług zrealizowanych według lekarza i DataWizyty.
+-- W zestawieniu uwzględnia się kwoty związane z wizytami
+-- wykonanymi w analizowanym okresie, niezależnie od terminu
+-- wcześniejszej przedpłaty.
+SELECT
+    LekarzID,
+    LekarzImie,
+    LekarzNazwisko,
+    SUM(Kwota) AS WartoscZrealizowanychUslug
+FROM vw_FactWizyty
+WHERE StatusWizytyID = 2
+  AND DataWizyty >= @DataOd
+  AND DataWizyty < @DataDo
+  AND Kwota IS NOT NULL
+GROUP BY
+    LekarzID,
+    LekarzImie,
+    LekarzNazwisko
+ORDER BY
+    WartoscZrealizowanychUslug DESC,
+    LekarzNazwisko,
+    LekarzImie;

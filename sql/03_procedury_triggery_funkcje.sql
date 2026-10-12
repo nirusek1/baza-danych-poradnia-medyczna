@@ -2,31 +2,17 @@
 ====================================================================
 PLIK: 03_procedury_triggery_funkcje.sql
 
-Skrypt definiuje elementy logiki aplikacyjnej bazy danych:
-- procedury składowane obsługujące operacje biznesowe
-- funkcje użytkownika wykorzystywane w zapytaniach
-- triggery egzekwujące reguły integralności
-
-Obiekty te odpowiadają za walidację danych,
-automatyzację procesów oraz utrzymanie spójności
-modelu danych poradni medycznej.
+ZAKRES: Procedury operacyjne, funkcje i triggery diagnoz.
 ====================================================================
 */
 
+USE PoradniaDB;
+GO
 
 
 /*
 ====================================================================
 I. PROCEDURY SKŁADOWANE
-====================================================================
-
-Procedury implementują operacje biznesowe systemu
-związane z obsługą wizyt, diagnoz oraz płatności.
-
-Zastosowanie procedur pozwala:
-- centralizować logikę aplikacyjną
-- ograniczyć bezpośredni dostęp do tabel
-- zapewnić spójność operacji zapisu danych
 ====================================================================
 */
 
@@ -34,14 +20,11 @@ Zastosowanie procedur pozwala:
 /*
 --------------------------------------------------------------------
 PROCEDURA: sp_DodajPlatnosc
+--------------------------------------------------------------------
 
-Tworzy rekord płatności dla wskazanej wizyty.
-
-Kwota pobierana jest z tabeli Cennik na podstawie typu wizyty.
-Data płatności ustalana jest zgodnie z typem wizyty
-(teleporada – DataUtworzenia, wizyta stacjonarna – DataWizyty).
-
-Po utworzeniu płatności aktualizowany jest StatusPlatnosciID wizyty.
+Dla zrealizowanej wizyty bez płatności pobiera cenę z Cennik,
+dodaje płatność z datą bieżącą i ustawia status opłacona.
+Teleporady opłacane są w sp_ZarejestrujWizyte.
 --------------------------------------------------------------------
 */
 
@@ -64,37 +47,49 @@ IF EXISTS (
 )
     THROW 50002, 'Platnosc dla tej wizyty juz istnieje.', 1;
 
+IF EXISTS (
+    SELECT 1
+    FROM Wizyta
+    WHERE WizytaID = @WizytaID
+      AND StatusWizytyID <> 2
+)
+    THROW 50003, 'Platnosc mozna dodac tylko dla wizyty zrealizowanej.', 1;
+
+IF NOT EXISTS (
+    SELECT 1
+    FROM Wizyta w
+        JOIN Cennik c
+            ON w.TypWizytyID = c.TypWizytyID
+    WHERE w.WizytaID = @WizytaID
+)
+    THROW 50004, 'Brak ceny dla typu wskazanej wizyty.', 1;
+
 INSERT INTO Platnosc (WizytaID, Kwota, DataPlatnosci)
 SELECT 
     w.WizytaID,
     c.Kwota,
-    CASE 
-        WHEN w.TypWizytyID = 3 THEN w.DataUtworzenia
-        ELSE w.DataWizyty
-    END
+	GETDATE()
 FROM Wizyta w
     JOIN Cennik c ON w.TypWizytyID = c.TypWizytyID
-WHERE w.WizytaID = @WizytaID AND w.StatusWizytyID = 2;
+WHERE w.WizytaID = @WizytaID;
 
 UPDATE Wizyta
 SET StatusPlatnosciID = 2
-WHERE WizytaID = @WizytaID AND StatusWizytyID = 2;
+WHERE WizytaID = @WizytaID;
 
 END;
+GO
 
 
 
 /*
 --------------------------------------------------------------------
 PROCEDURA: sp_DodajPacjenta
+--------------------------------------------------------------------
 
-Rejestruje pacjenta w tabeli Pacjent.
-
-Walidacja:
-- unikalność PESEL
-- poprawność wartości Plec
-- minimalny wiek pacjenta
-- wymagana co najmniej jedna forma kontaktu
+Dodaje pacjenta po kontroli unikalności PESEL, płci,
+pełnoletności i obecności co najmniej jednej formy kontaktu.
+Format danych kontaktowych weryfikują ograniczenia tabeli.
 --------------------------------------------------------------------
 */
 
@@ -115,16 +110,16 @@ IF EXISTS (
     FROM Pacjent
     WHERE PESEL = @PESEL
 )
-    THROW 50003, 'Pacjent z podanym numerem PESEL juz istnieje.', 1;
+    THROW 50005, 'Pacjent z podanym numerem PESEL juz istnieje.', 1;
 
 IF @Plec NOT IN ('K','M')
-    THROW 50004, 'Niepoprawna wartosc pola Plec.', 1;
+    THROW 50006, 'Niepoprawna wartosc pola Plec.', 1;
 
 IF @DataUrodzenia > DATEADD(YEAR,-18,GETDATE())
-    THROW 50005, 'Pacjent musi miec co najmniej 18 lat.', 1;
+    THROW 50007, 'Pacjent musi miec co najmniej 18 lat.', 1;
 
 IF @Telefon IS NULL AND @Email IS NULL
-    THROW 50006, 'Nalezy podac przynajmniej telefon lub email.', 1;
+    THROW 50008, 'Nalezy podac przynajmniej telefon lub email.', 1;
 
 INSERT INTO Pacjent
 (Imie, Nazwisko, PESEL, DataUrodzenia, Plec, Adres, Telefon, Email)
@@ -132,49 +127,72 @@ VALUES
 (@Imie, @Nazwisko, @PESEL, @DataUrodzenia, @Plec, @Adres, @Telefon, @Email);
 
 END;
+GO
 
 
 
 /*
 --------------------------------------------------------------------
 PROCEDURA: sp_ZarejestrujWizyte
+--------------------------------------------------------------------
 
-Tworzy rekord wizyty powiązanej z pacjentem i lekarzem.
-
-Walidacja:
-- istnienie pacjenta i lekarza
-- poprawność daty wizyty
-- brak konfliktu terminu dla lekarza
-
-StatusWizytyID inicjalizowany jako „umówiona”.
-StatusPlatnosciID zależny od typu wizyty.
+Sprawdza pacjenta, lekarza, specjalizację, typ i cenę wizyty
+oraz termin i brak kolizji w harmonogramie lekarza.
+Tworzy wizytę ze statusem umówiona; dla teleporady
+dodaje przedpłatę i nadaje status płatności opłacona.
 --------------------------------------------------------------------
 */
 
 CREATE PROCEDURE sp_ZarejestrujWizyte
     @PacjentID INT,
     @LekarzID INT,
-    @DataWizyty DATETIME2,
+	@SpecjalizacjaID INT,
+    @DataWizyty DATETIME2(0),
     @TypWizytyID INT
 AS
 BEGIN
+
+DECLARE @DataUtworzenia DATETIME2(0) = GETDATE();
+DECLARE @WizytaID INT;
 
 IF NOT EXISTS (
     SELECT 1
     FROM Pacjent
     WHERE PacjentID = @PacjentID
 )
-    THROW 50007, 'Pacjent o podanym ID nie istnieje.', 1;
+    THROW 50009, 'Pacjent o podanym ID nie istnieje.', 1;
 
 IF NOT EXISTS (
     SELECT 1
     FROM Lekarz
     WHERE LekarzID = @LekarzID
 )
-    THROW 50008, 'Lekarz o podanym ID nie istnieje.', 1;
+    THROW 50010, 'Lekarz o podanym ID nie istnieje.', 1;
 
-IF @DataWizyty < GETDATE()
-    THROW 50009, 'Nieprawidłowa data wizyty.', 1;
+IF NOT EXISTS (
+	SELECT 1
+	FROM LekarzSpecjalizacja
+	WHERE LekarzID = @LekarzID
+		AND SpecjalizacjaID = @SpecjalizacjaID
+)
+	THROW 50011, 'Lekarz nie posiada wskazanej specjalizacji.', 1;
+
+IF NOT EXISTS (
+    SELECT 1
+    FROM TypWizyty
+    WHERE TypWizytyID = @TypWizytyID
+)
+    THROW 50012, 'Typ wizyty o podanym ID nie istnieje.', 1;
+
+IF NOT EXISTS (
+    SELECT 1
+    FROM Cennik
+    WHERE TypWizytyID = @TypWizytyID
+)
+    THROW 50004, 'Brak ceny dla wskazanego typu wizyty.', 1;
+
+IF @DataWizyty <= @DataUtworzenia
+    THROW 50013, 'Nieprawidlowa data wizyty.', 1;
 
 IF EXISTS (
     SELECT 1
@@ -182,15 +200,16 @@ IF EXISTS (
     WHERE LekarzID = @LekarzID
       AND DataWizyty = @DataWizyty
 )
-    THROW 50010, 'Lekarz ma juz zaplanowana wizyte w tym terminie.', 1;
+    THROW 50014, 'Lekarz ma juz zaplanowana wizyte w tym terminie.', 1;
 
 INSERT INTO Wizyta
-(PacjentID, LekarzID, DataWizyty, DataUtworzenia, StatusWizytyID, StatusPlatnosciID, TypWizytyID)
+(PacjentID, LekarzID, SpecjalizacjaID, DataWizyty, DataUtworzenia, StatusWizytyID, StatusPlatnosciID, TypWizytyID)
 VALUES
 (@PacjentID, 
-@LekarzID, 
+@LekarzID,
+@SpecjalizacjaID,
 @DataWizyty, 
-GETDATE(), 
+@DataUtworzenia, 
 1, 
 CASE 
     WHEN @TypWizytyID = 3 THEN 2
@@ -198,21 +217,37 @@ CASE
 END, 
 @TypWizytyID);
 
+SET @WizytaID = SCOPE_IDENTITY();
+
+IF @TypWizytyID = 3
+BEGIN
+    INSERT INTO Platnosc (
+        WizytaID,
+        Kwota,
+        DataPlatnosci
+    )
+    SELECT
+        @WizytaID,
+        Kwota,
+        @DataUtworzenia
+    FROM Cennik
+    WHERE TypWizytyID = @TypWizytyID;
 END;
+
+END;
+GO
 
 
 
 /*
 --------------------------------------------------------------------
 PROCEDURA: sp_AnulujWizyte
+--------------------------------------------------------------------
 
-Zmienia status wizyty na „anulowana”.
-
-Operacja blokowana dla wizyt zrealizowanych
-oraz wcześniej anulowanych.
-
-Dla teleporady ustawiany jest status płatności „zwrot”.
-Rekord w tabeli Platnosc pozostaje jako zapis historii finansowej.
+Anuluje wyłącznie wizytę umówioną; odrzuca ponowne
+anulowanie oraz anulowanie wizyty zrealizowanej.
+Dla teleporady zmienia status płatności na zwrot,
+zachowując rekord Platnosc; nie realizuje przelewu zwrotnego.
 --------------------------------------------------------------------
 */
 
@@ -234,7 +269,7 @@ IF EXISTS (
     WHERE WizytaID = @WizytaID
       AND StatusWizytyID = 2
 )
-    THROW 50011, 'Nie mozna anulowac wizyty zrealizowanej.', 1;
+    THROW 50015, 'Nie mozna anulowac wizyty zrealizowanej.', 1;
 
 IF EXISTS (
     SELECT 1
@@ -242,7 +277,7 @@ IF EXISTS (
     WHERE WizytaID = @WizytaID
       AND StatusWizytyID = 3
 )
-    THROW 50012, 'Wizyta jest juz anulowana.', 1;
+    THROW 50016, 'Wizyta jest juz anulowana.', 1;
 
 UPDATE Wizyta
 SET
@@ -254,24 +289,25 @@ SET
         END
 WHERE WizytaID = @WizytaID;
 
-END
+END;
+GO
 
 
 
 /*
 --------------------------------------------------------------------
 PROCEDURA: sp_SprawdzDostepnoscLekarza
+--------------------------------------------------------------------
 
-Weryfikuje dostępność lekarza w określonym terminie.
-
-Sprawdza istnienie wizyty dla wskazanego lekarza
-i daty w tabeli Wizyta.
+Zwraca dostępność terminu na podstawie istnienia dowolnej
+wizyty lekarza o wskazanej dacie i godzinie.
+Anulowane wizyty również oznaczają termin jako zajęty.
 --------------------------------------------------------------------
 */
 
 CREATE PROCEDURE sp_SprawdzDostepnoscLekarza
     @LekarzID INT,
-    @DataWizyty DATETIME2
+    @DataWizyty DATETIME2(0)
 AS
 BEGIN
 
@@ -280,7 +316,7 @@ IF NOT EXISTS (
     FROM Lekarz
     WHERE LekarzID = @LekarzID
 )
-    THROW 50008, 'Lekarz o podanym ID nie istnieje.', 1;
+    THROW 50010, 'Lekarz o podanym ID nie istnieje.', 1;
 
 SELECT
     CASE
@@ -292,18 +328,19 @@ SELECT
         THEN 'Termin zajęty'
         ELSE 'Termin dostępny'
     END AS Status;
+
 END;
+GO
 
 
 
 /*
 --------------------------------------------------------------------
 PROCEDURA: sp_HistoriaPacjenta
+--------------------------------------------------------------------
 
-Zwraca historię wizyt pacjenta na podstawie widoku
-vw_HistoriaWizytPacjenta.
-
-Wyniki sortowane malejąco według DataWizyty.
+Zwraca dane z vw_HistoriaWizytPacjenta dla wskazanego
+pacjenta, malejąco według DataWizyty.
 --------------------------------------------------------------------
 */
 
@@ -317,7 +354,7 @@ IF NOT EXISTS (
     FROM Pacjent
     WHERE PacjentID = @PacjentID
 )
-    THROW 50007, 'Pacjent o podanym ID nie istnieje.', 1;
+    THROW 50009, 'Pacjent o podanym ID nie istnieje.', 1;
 
 SELECT *
 FROM vw_HistoriaWizytPacjenta
@@ -325,17 +362,18 @@ WHERE PacjentID = @PacjentID
 ORDER BY DataWizyty DESC;
 
 END;
+GO
 
 
 
 /*
 --------------------------------------------------------------------
 PROCEDURA: sp_RaportMiesieczny
+--------------------------------------------------------------------
 
-Agreguje dane operacyjne dla wskazanego miesiąca:
-
-- liczba wizyt zrealizowanych
-- łączny przychód z płatności
+Wizyty zrealizowane liczy według daty wizyty;
+przychód z tych wizyt sumuje według daty płatności.
+Parametry: rok i miesiąc (1–12).
 --------------------------------------------------------------------
 */
 
@@ -345,28 +383,40 @@ CREATE PROCEDURE sp_RaportMiesieczny
 AS
 BEGIN
 
+IF @Miesiac NOT BETWEEN 1 AND 12
+    THROW 50017, 'Miesiac musi miec wartosc od 1 do 12.', 1;
+
+DECLARE @DataOd DATE = DATEFROMPARTS(@Rok, @Miesiac, 1);
+DECLARE @DataDo DATE = DATEADD(MONTH, 1, @DataOd);
+
 SELECT
-    COUNT(*) AS LiczbaWizyt,
-    SUM(p.Kwota) AS Przychod
-FROM Wizyta w
-LEFT JOIN Platnosc p ON w.WizytaID = p.WizytaID
-WHERE
-    YEAR(w.DataWizyty) = @Rok
-    AND MONTH(w.DataWizyty) = @Miesiac
-    AND w.StatusWizytyID = 2;
+    (SELECT COUNT(*)
+     FROM Wizyta w
+     WHERE w.StatusWizytyID = 2
+          AND w.DataWizyty >= @DataOd
+          AND w.DataWizyty < @DataDo
+    ) AS LiczbaWizyt,
+
+    (SELECT COALESCE(SUM(p.Kwota), 0)
+     FROM Platnosc p
+            JOIN Wizyta w ON p.WizytaID = w.WizytaID
+     WHERE w.StatusWizytyID = 2
+          AND p.DataPlatnosci >= @DataOd
+          AND p.DataPlatnosci < @DataDo
+    ) AS Przychod;
 
 END;
+GO
 
 
 
 /*
 --------------------------------------------------------------------
 PROCEDURA: sp_StatystykaLekarza
+--------------------------------------------------------------------
 
-Zwraca statystyki pracy lekarza:
-
-- liczba wizyt zrealizowanych
-- wygenerowany przychód
+Liczba zrealizowanych wizyt lekarza i suma przypisanych
+do nich kwot, bez ograniczenia dat wizyt lub płatności.
 --------------------------------------------------------------------
 */
 
@@ -380,11 +430,11 @@ IF NOT EXISTS (
     FROM Lekarz
     WHERE LekarzID = @LekarzID
 )
-    THROW 50008, 'Lekarz o podanym ID nie istnieje.', 1;
+    THROW 50010, 'Lekarz o podanym ID nie istnieje.', 1;
 
 SELECT
     COUNT(*) AS LiczbaWizyt,
-    SUM(p.Kwota) AS Przychod
+    COALESCE(SUM(p.Kwota), 0) AS Przychod
 FROM Wizyta w
 LEFT JOIN Platnosc p ON w.WizytaID = p.WizytaID
 WHERE 
@@ -392,6 +442,7 @@ WHERE
     AND w.StatusWizytyID = 2;
 
 END;
+GO
 
 
 
@@ -399,20 +450,16 @@ END;
 ====================================================================
 II. FUNKCJE UŻYTKOWNIKA
 ====================================================================
-
-Funkcje udostępniają logikę pomocniczą wykorzystywaną
-w zapytaniach analitycznych oraz procedurach biznesowych.
-====================================================================
 */
 
 
 /*
 --------------------------------------------------------------------
 FUNKCJA: fn_WiekPacjenta
+--------------------------------------------------------------------
 
-Oblicza wiek pacjenta w latach na podstawie daty urodzenia.
-Funkcja wykorzystywana w analizach demograficznych
-oraz raportach statystycznych.
+Wiek w pełnych latach na dzień wykonania funkcji (GETDATE);
+odrębny od wieku liczonego na stałą datę w Power BI.
 --------------------------------------------------------------------
 */
 
@@ -425,18 +472,18 @@ RETURN DATEDIFF(YEAR, @DataUrodzenia, GETDATE())
             WHEN DATEADD(YEAR, DATEDIFF(YEAR, @DataUrodzenia, GETDATE()), @DataUrodzenia) > GETDATE()
             THEN 1 ELSE 0
          END
+
 END;
+GO
 
 
 
 /*
---------------------------------------------------------------------
 FUNKCJA: fn_LiczbaWizytPacjenta
+--------------------------------------------------------------------
 
-Zwraca liczbę wizyt przypisanych do wskazanego pacjenta.
-
-Funkcja pomocnicza wykorzystywana w analizach
-aktywności pacjentów oraz w procedurach raportowych.
+Liczba wszystkich wizyt wskazanego pacjenta, niezależnie
+od statusu i daty wizyty.
 --------------------------------------------------------------------
 */
 
@@ -454,6 +501,7 @@ WHERE PacjentID = @PacjentID;
 RETURN @Liczba;
 
 END;
+GO
 
 
 
@@ -462,10 +510,7 @@ END;
 III. TRIGGERY
 ====================================================================
 
-Triggery odpowiadają za automatyczne egzekwowanie
-wybranych reguł integralności danych oraz
-obsługę zdarzeń zachodzących podczas operacji
-INSERT / UPDATE / DELETE.
+Oba triggery uruchamiane są po INSERT; nie obsługują UPDATE.
 ====================================================================
 */
 
@@ -473,11 +518,10 @@ INSERT / UPDATE / DELETE.
 /*
 --------------------------------------------------------------------
 TRIGGER: trg_Diagnoza_Specjalizacja
+--------------------------------------------------------------------
 
-Weryfikuje zgodność kodu ICD10 z zakresem diagnoz
-dopuszczonych dla specjalizacji lekarza realizującego wizytę.
-
-Naruszenie reguły przerywa operację INSERT.
+AFTER INSERT: odrzuca rozpoznanie ICD-10 nieprzypisane
+do specjalizacji wskazanej w wizycie.
 --------------------------------------------------------------------
 */
 
@@ -489,26 +533,27 @@ BEGIN
     IF EXISTS (
         SELECT 1
         FROM inserted i
-        JOIN Wizyta w 
+        JOIN Wizyta w
             ON i.WizytaID = w.WizytaID
-        LEFT JOIN LekarzSpecjalizacja ls
-            ON w.LekarzID = ls.LekarzID
-        LEFT JOIN SpecjalizacjaICD10 s
-            ON s.SpecjalizacjaID = ls.SpecjalizacjaID
-           AND s.ICD10ID = i.ICD10ID
-        WHERE s.ICD10ID IS NULL
+        LEFT JOIN SpecjalizacjaICD10 si
+            ON si.SpecjalizacjaID = w.SpecjalizacjaID
+           AND si.ICD10ID = i.ICD10ID
+        WHERE si.ICD10ID IS NULL
     )
-        THROW 50013, 'Kod ICD10 jest niezgodny ze specjalizacja lekarza.', 1;
+        THROW 50018, 'Kod ICD10 jest niezgodny ze specjalizacja przypisana do wizyty.', 1;
+
 END;
+GO
 
 
 
 /*
 --------------------------------------------------------------------
 TRIGGER: trg_Diagnoza_Status
+--------------------------------------------------------------------
 
-Wymusza dodawanie diagnozy wyłącznie do wizyt
-o statusie „zrealizowana”.
+AFTER INSERT: odrzuca diagnozę dla wizyty o statusie
+innym niż zrealizowana.
 --------------------------------------------------------------------
 */
 
@@ -523,5 +568,7 @@ BEGIN
         JOIN Wizyta w ON i.WizytaID = w.WizytaID
         WHERE w.StatusWizytyID <> 2
     )
-        THROW 50014, 'Diagnoza moze byc dodana tylko dla wizyty zrealizowanej.', 1;
+        THROW 50019, 'Diagnoza moze byc dodana tylko dla wizyty zrealizowanej.', 1;
+
 END;
+GO

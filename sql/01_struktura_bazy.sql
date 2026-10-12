@@ -4,9 +4,7 @@ PROJEKT: Baza danych prywatnej poradni specjalistycznej
 BAZA DANYCH: PoradniaDB
 PLIK: 01_struktura_bazy.sql
 
-Skrypt definiuje strukturę relacyjnej bazy danych systemu poradni.
-Zawiera definicje tabel, kluczy głównych, kluczy obcych oraz
-ograniczeń integralności danych.
+ZAKRES: Tabele, klucze, ograniczenia integralności i indeksy.
 ====================================================================
 */
 
@@ -30,11 +28,6 @@ GO
 /*
 ====================================================================
 I. TABELE SŁOWNIKOWE
-====================================================================
-
-Zbiory wartości referencyjnych wykorzystywane w relacjach oraz
-walidacji danych (np. typ wizyty, status wizyty, status płatności,
-rola użytkownika, specjalizacja lekarska, kody klasyfikacji ICD-10).
 ====================================================================
 */
 
@@ -83,7 +76,7 @@ II. TABELA POMOCNICZA
 ====================================================================
 
 Tabela przechowująca cennik wizyt medycznych przypisany do typu
-wizyty. Dane wykorzystywane przy generowaniu informacji o płatności.
+wizyty.
 ====================================================================
 */
 
@@ -107,24 +100,17 @@ GO
 III. TABELE GŁÓWNE
 ====================================================================
 
-Encje operacyjne systemu: pacjenci, użytkownicy systemu,
-lekarze, wizyty, diagnozy oraz płatności.
+Podstawowe encje systemu: pacjenci, użytkownicy systemu oraz lekarze.
 ====================================================================
 */
-
 
 /*
 --------------------------------------------------------------------
 TABELA: Pacjent
 --------------------------------------------------------------------
 
-Dane identyfikacyjne pacjentów poradni.
-
-Ograniczenia integralności:
-- unikalność numeru PESEL
-- kontrola wartości w kolumnie Plec
-- minimalny wiek pacjenta (>= 18 lat)
-- walidacja podstawowych danych kontaktowych
+Unikalny PESEL, dozwolone wartości płci i wiek co najmniej 18 lat.
+Walidacja PESEL, telefonu i e-maila; wymagany telefon lub e-mail.
 --------------------------------------------------------------------
 */
 
@@ -143,10 +129,8 @@ CREATE TABLE Pacjent (
         CHECK (Plec IN ('K','M')),
 
     CONSTRAINT CK_Pacjent_DataUrodzenia
-        CHECK (
-            DataUrodzenia >= '1900-01-01'
-            AND DataUrodzenia <= DATEADD(YEAR,-18,GETDATE())
-        ),
+        CHECK (DataUrodzenia >= '19000101'
+            AND DataUrodzenia <= CAST(DATEADD(YEAR, -18, GETDATE()) AS DATE)),
 
     CONSTRAINT CK_Pacjent_PESEL_Dlugosc
         CHECK (LEN(PESEL) = 11),
@@ -155,16 +139,12 @@ CREATE TABLE Pacjent (
         CHECK (PESEL NOT LIKE '%[^0-9]%'),
 
     CONSTRAINT CK_Pacjent_Telefon_Format
-        CHECK (
-            Telefon IS NULL
-            OR (Telefon NOT LIKE '%[^0-9]%' AND LEN(Telefon) BETWEEN 9 AND 15)
-        ),
+        CHECK (Telefon IS NULL
+            OR (Telefon NOT LIKE '%[^0-9]%' AND LEN(Telefon) BETWEEN 9 AND 15)),
 
     CONSTRAINT CK_Pacjent_Email_Format
-        CHECK (
-            Email IS NULL
-            OR (Email LIKE '%_@_%._%' AND Email NOT LIKE '% %')
-        ),
+        CHECK (Email IS NULL
+            OR (Email LIKE '%_@_%._%' AND Email NOT LIKE '% %')),
 
     CONSTRAINT CK_Pacjent_Min_Jeden_Kontakt
         CHECK (Email IS NOT NULL OR Telefon IS NOT NULL)
@@ -177,12 +157,9 @@ GO
 TABELA: Uzytkownik
 --------------------------------------------------------------------
 
-Konta użytkowników systemu poradni (administrator, lekarz,
-pracownik rejestracji). Każde konto posiada przypisaną rolę
-systemową określającą poziom uprawnień.
-
-Hasła przechowywane są w postaci skrótu kryptograficznego
-(hash).
+Konta przypisane do ról; unikalny adres e-mail.
+HasloHash przeznaczone do przechowywania skrótu hasła.
+Walidacja formatu telefonu i e-maila.
 --------------------------------------------------------------------
 */
 
@@ -197,7 +174,14 @@ CREATE TABLE Uzytkownik (
 
     CONSTRAINT FK_Uzytkownik_Rola
         FOREIGN KEY (RolaID) 
-        REFERENCES Rola(RolaID)
+        REFERENCES Rola(RolaID),
+
+	CONSTRAINT CK_Uzytkownik_Telefon_Format
+    CHECK (Telefon IS NULL
+        OR (Telefon NOT LIKE '%[^0-9]%' AND LEN(Telefon) BETWEEN 9 AND 15)),
+
+	CONSTRAINT CK_Uzytkownik_Email_Format
+    CHECK (Email LIKE '%_@_%._%' AND Email NOT LIKE '% %')
 );
 GO
 
@@ -207,10 +191,7 @@ GO
 TABELA: Lekarz
 --------------------------------------------------------------------
 
-Informacje o lekarzach pracujących w poradni.
-
-Każdy lekarz jest powiązany z kontem użytkownika systemu
-oraz posiada unikalny numer prawa wykonywania zawodu (PWZ).
+Relacja jeden-do-jednego z kontem użytkownika; unikalny numer PWZ.
 --------------------------------------------------------------------
 */
 
@@ -221,142 +202,7 @@ CREATE TABLE Lekarz (
 
     CONSTRAINT FK_Lekarz_Uzytkownik
         FOREIGN KEY (UzytkownikID)
-        REFERENCES Uzytkownik(UzytkownikID),
-);
-GO
-
-
-/*
---------------------------------------------------------------------
-TABELA: Wizyta
---------------------------------------------------------------------
-
-Rejestr wizyt lekarskich.
-
-Zastosowane ograniczenia zapewniają spójność harmonogramu
-pracy poradni:
-
-- brak możliwości rejestracji dwóch wizyt lekarza w tym samym czasie
-- data utworzenia wizyty wcześniejsza niż data wizyty
-- wizyty realizowane wyłącznie w dni robocze
-- rozpoczęcie wizyty w interwałach 30-minutowych
-- wizyty realizowane w godzinach pracy poradni
-- zgodność statusu wizyty ze statusem płatności
---------------------------------------------------------------------
-*/
-
-CREATE TABLE Wizyta (
-    WizytaID INT IDENTITY(1,1) PRIMARY KEY,
-    PacjentID INT NOT NULL,
-    LekarzID INT NOT NULL,
-    DataWizyty DATETIME2 NOT NULL,
-    DataUtworzenia DATETIME2 NOT NULL,
-    StatusWizytyID INT NOT NULL,
-    StatusPlatnosciID INT NOT NULL,
-    TypWizytyID INT NOT NULL,
-
-    CONSTRAINT FK_Wizyta_Pacjent
-        FOREIGN KEY (PacjentID) 
-        REFERENCES Pacjent(PacjentID),
-
-    CONSTRAINT FK_Wizyta_Lekarz
-        FOREIGN KEY (LekarzID) 
-        REFERENCES Lekarz(LekarzID),
-
-    CONSTRAINT FK_Wizyta_StatusWizyty
-        FOREIGN KEY (StatusWizytyID) 
-        REFERENCES StatusWizyty(StatusWizytyID),
-
-    CONSTRAINT FK_Wizyta_StatusPlatnosci
-        FOREIGN KEY (StatusPlatnosciID) 
-        REFERENCES StatusPlatnosci(StatusPlatnosciID),
-
-    CONSTRAINT FK_Wizyta_TypWizyty
-        FOREIGN KEY (TypWizytyID) 
-        REFERENCES TypWizyty(TypWizytyID),
-
-    CONSTRAINT UQ_Lekarz_DataWizyty
-        UNIQUE (LekarzID, DataWizyty),
-
-    CONSTRAINT CK_Wizyta_Daty
-        CHECK (DataUtworzenia < DataWizyty),
-
-    CONSTRAINT CK_Wizyta_DzienRoboczy
-        CHECK (DATEPART(WEEKDAY, DataWizyty) BETWEEN 2 AND 6),
-
-    CONSTRAINT CK_Wizyta_Interwal30Min
-        CHECK (DATEPART(MINUTE, DataWizyty) IN (0,30)),
-
-    CONSTRAINT CK_Wizyta_GodzinyPracy
-        CHECK (DATEPART(HOUR, DataWizyty) BETWEEN 8 AND 15),
-
-    CONSTRAINT CK_Wizyta_StatusLogiczny
-        CHECK (NOT (StatusWizytyID = 3 AND StatusPlatnosciID = 2)),
-
-    CONSTRAINT CK_Wizyta_Typ_StatusPlatnosci
-        CHECK (NOT (TypWizytyID = 3 AND StatusPlatnosciID = 1))
-);
-GO
-
-
-/*
---------------------------------------------------------------------
-TABELA: Diagnoza
---------------------------------------------------------------------
-
-Rozpoznania medyczne przypisane do zrealizowanych wizyt.
-
-Diagnozy odwołują się do klasyfikacji ICD-10. Dodatkowo
-stosowana jest walidacja zgodności diagnozy z zakresem
-specjalizacji lekarza.
---------------------------------------------------------------------
-*/
-
-CREATE TABLE Diagnoza (
-    DiagnozaID INT IDENTITY(1,1) PRIMARY KEY,
-    WizytaID INT NOT NULL UNIQUE,
-    ICD10ID INT NOT NULL,
-    OpisDodatkowy NVARCHAR(500) NULL,
-
-    CONSTRAINT FK_Diagnoza_Wizyta
-        FOREIGN KEY (WizytaID) 
-        REFERENCES Wizyta(WizytaID),
-
-    CONSTRAINT FK_Diagnoza_ICD10
-        FOREIGN KEY (ICD10ID) 
-        REFERENCES ICD10(ICD10ID)
-);
-GO
-
-
-/*
---------------------------------------------------------------------
-TABELA: Platnosc
---------------------------------------------------------------------
-
-Rejestr płatności powiązanych z wizytami.
-
-Każdej wizycie może odpowiadać maksymalnie jedna płatność.
-Kwota przechowywana jest w tabeli w celu zachowania
-historycznej wartości usługi niezależnie od zmian w cenniku.
-
-Model zakłada pojedynczą płatność przypisaną do wizyty,
-co jest wystarczające dla potrzeb systemu raportowania.
---------------------------------------------------------------------
-*/
-
-CREATE TABLE Platnosc (
-    PlatnoscID INT IDENTITY(1,1) PRIMARY KEY,
-    WizytaID INT NOT NULL UNIQUE,
-    Kwota DECIMAL(10,2) NOT NULL,
-    DataPlatnosci DATETIME2 NOT NULL,
-
-    CONSTRAINT FK_Platnosc_Wizyta
-        FOREIGN KEY (WizytaID) 
-        REFERENCES Wizyta(WizytaID),
-
-    CONSTRAINT CK_Platnosc_Kwota
-        CHECK (Kwota > 0)
+        REFERENCES Uzytkownik(UzytkownikID)
 );
 GO
 
@@ -411,28 +257,158 @@ GO
 
 /*
 ====================================================================
-V. TABELE RELACYJNE
+V. TABELE OPERACYJNE
 ====================================================================
 
-Tabele realizujące relacje wiele-do-wielu pomiędzy encjami
-systemu (lekarz – specjalizacja, specjalizacja – ICD-10).
+Encje operacyjne systemu: wizyty, diagnozy oraz płatności.
+====================================================================
+*/
+
+/*
+--------------------------------------------------------------------
+TABELA: Wizyta
+--------------------------------------------------------------------
+
+UNIQUE(LekarzID, DataWizyty) blokuje powtórne zajęcie terminu
+również wtedy, gdy istniejąca wizyta ma status anulowanej.
+Termin: poniedziałek–piątek, 08:00–15:30, co 30 minut.
+DataUtworzenia musi poprzedzać DataWizyty.
+Klucz złożony wymusza przypisanie lekarza do specjalizacji.
+CHECK blokuje wybrane niedozwolone połączenia typu wizyty,
+statusu wizyty i statusu płatności.
+--------------------------------------------------------------------
+*/
+
+CREATE TABLE Wizyta (
+    WizytaID INT IDENTITY(1,1) PRIMARY KEY,
+    PacjentID INT NOT NULL,
+    LekarzID INT NOT NULL,
+    DataWizyty DATETIME2(0) NOT NULL,
+    DataUtworzenia DATETIME2(0) NOT NULL,
+    StatusWizytyID INT NOT NULL,
+    StatusPlatnosciID INT NOT NULL,
+    TypWizytyID INT NOT NULL,
+	SpecjalizacjaID INT NOT NULL,
+
+    CONSTRAINT FK_Wizyta_Pacjent
+        FOREIGN KEY (PacjentID) 
+        REFERENCES Pacjent(PacjentID),
+
+    CONSTRAINT FK_Wizyta_StatusWizyty
+        FOREIGN KEY (StatusWizytyID) 
+        REFERENCES StatusWizyty(StatusWizytyID),
+
+    CONSTRAINT FK_Wizyta_StatusPlatnosci
+        FOREIGN KEY (StatusPlatnosciID) 
+        REFERENCES StatusPlatnosci(StatusPlatnosciID),
+
+    CONSTRAINT FK_Wizyta_TypWizyty
+        FOREIGN KEY (TypWizytyID) 
+        REFERENCES TypWizyty(TypWizytyID),
+
+	CONSTRAINT FK_Wizyta_LekarzSpecjalizacja
+		FOREIGN KEY (LekarzID, SpecjalizacjaID)
+		REFERENCES LekarzSpecjalizacja(LekarzID, SpecjalizacjaID),
+
+    CONSTRAINT UQ_Lekarz_DataWizyty
+        UNIQUE (LekarzID, DataWizyty),
+
+    CONSTRAINT CK_Wizyta_Daty
+        CHECK (DataUtworzenia < DataWizyty),
+
+	CONSTRAINT CK_Wizyta_DzienRoboczy
+		CHECK (DATEDIFF(DAY, '19000101', CAST(DataWizyty AS DATE)) % 7
+			BETWEEN 0 AND 4),
+
+    CONSTRAINT CK_Wizyta_Interwal30Min
+        CHECK (DATEPART(MINUTE, DataWizyty) IN (0,30)
+			AND DATEPART(SECOND, DataWizyty) = 0),
+
+    CONSTRAINT CK_Wizyta_GodzinyPracy
+        CHECK (DATEPART(HOUR, DataWizyty) BETWEEN 8 AND 15),
+
+    CONSTRAINT CK_Wizyta_StatusLogiczny
+        CHECK (NOT (StatusWizytyID = 3 AND StatusPlatnosciID = 2)),
+
+    CONSTRAINT CK_Wizyta_Typ_StatusPlatnosci
+        CHECK (NOT (TypWizytyID = 3 AND StatusPlatnosciID = 1))
+);
+GO
+
+
+/*
+--------------------------------------------------------------------
+TABELA: Diagnoza
+--------------------------------------------------------------------
+
+Maksymalnie jedno rozpoznanie ICD-10 na wizytę (UNIQUE WizytaID).
+Zgodność ze specjalizacją i statusem wizyty sprawdzają triggery
+przy dodawaniu diagnozy.
+--------------------------------------------------------------------
+*/
+
+CREATE TABLE Diagnoza (
+    DiagnozaID INT IDENTITY(1,1) PRIMARY KEY,
+    WizytaID INT NOT NULL UNIQUE,
+    ICD10ID INT NOT NULL,
+    OpisDodatkowy NVARCHAR(500) NULL,
+
+    CONSTRAINT FK_Diagnoza_Wizyta
+        FOREIGN KEY (WizytaID) 
+        REFERENCES Wizyta(WizytaID),
+
+    CONSTRAINT FK_Diagnoza_ICD10
+        FOREIGN KEY (ICD10ID) 
+        REFERENCES ICD10(ICD10ID)
+);
+GO
+
+
+/*
+--------------------------------------------------------------------
+TABELA: Platnosc
+--------------------------------------------------------------------
+
+Maksymalnie jedna płatność na wizytę (UNIQUE WizytaID).
+Kwota zapisuje wartość świadczenia w chwili rozliczenia,
+niezależnie od późniejszych zmian w tabeli Cennik.
+--------------------------------------------------------------------
+*/
+
+CREATE TABLE Platnosc (
+    PlatnoscID INT IDENTITY(1,1) PRIMARY KEY,
+    WizytaID INT NOT NULL UNIQUE,
+    Kwota DECIMAL(10,2) NOT NULL,
+    DataPlatnosci DATETIME2(0) NOT NULL,
+
+    CONSTRAINT FK_Platnosc_Wizyta
+        FOREIGN KEY (WizytaID) 
+        REFERENCES Wizyta(WizytaID),
+
+    CONSTRAINT CK_Platnosc_Kwota
+        CHECK (Kwota > 0)
+);
+GO
+
+
+
+/*
+====================================================================
+VI. INDEKSY
 ====================================================================
 */
 
 CREATE INDEX IX_Wizyta_DataWizyty
 ON Wizyta (DataWizyty);
 
-CREATE INDEX IX_Wizyta_LekarzID
-ON Wizyta (LekarzID);
+CREATE INDEX IX_Wizyta_Pacjent_Data
+ON Wizyta(PacjentID, DataWizyty);
 
-CREATE INDEX IX_Wizyta_PacjentID
-ON Wizyta (PacjentID);
+CREATE INDEX IX_Wizyta_Specjalizacja_Data
+ON Wizyta (SpecjalizacjaID, DataWizyty);
 
 CREATE INDEX IX_Diagnoza_ICD10ID
 ON Diagnoza (ICD10ID);
 
 CREATE INDEX IX_Platnosc_DataPlatnosci
 ON Platnosc(DataPlatnosci);
-
-CREATE INDEX IX_Wizyta_Pacjent_Data
-ON Wizyta(PacjentID, DataWizyty);

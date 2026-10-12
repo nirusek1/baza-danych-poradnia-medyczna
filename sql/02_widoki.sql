@@ -2,25 +2,18 @@
 ====================================================================
 PLIK: 02_widoki.sql
 
-Skrypt definiuje widoki wykorzystywane do:
-- kontroli integralności i spójności danych
-- analizy operacyjnej systemu poradni
-- raportowania medycznego i finansowego
-- zasilania warstwy analitycznej
+ZAKRES: Widoki kontrolne i analityczne, w tym źródło FactWizyta.
 ====================================================================
 */
 
+
+USE PoradniaDB;
+GO
 
 
 /*
 ====================================================================
 I. WIDOKI KONTROLNE
-====================================================================
-
-Widoki służą do identyfikacji potencjalnych niespójności
-w danych operacyjnych systemu. Pozwalają wykryć błędy
-wprowadzania danych lub nieprawidłowy przebieg procesów
-biznesowych (diagnostycznych i finansowych).
 ====================================================================
 */
 
@@ -29,9 +22,7 @@ biznesowych (diagnostycznych i finansowych).
 --------------------------------------------------------------------
 WIDOK: vw_WizytaBezDiagnozy
 
-Identyfikuje wizyty oznaczone jako zrealizowane,
-dla których nie zarejestrowano rozpoznania medycznego
-w tabeli Diagnoza.
+Wizyty o statusie zrealizowana bez rekordu w tabeli Diagnoza.
 --------------------------------------------------------------------
 */
 
@@ -42,6 +33,7 @@ WHERE w.StatusWizytyID = 2
 AND NOT EXISTS (
     SELECT 1 FROM Diagnoza d WHERE d.WizytaID = w.WizytaID
 );
+GO
 
 
 
@@ -49,9 +41,7 @@ AND NOT EXISTS (
 --------------------------------------------------------------------
 WIDOK: vw_WizytaBezPlatnosci
 
-Wykrywa wizyty oznaczone jako opłacone,
-dla których brak odpowiadającego rekordu
-w tabeli Platnosc.
+Wizyty ze statusem płatności opłacona bez rekordu w Platnosc.
 --------------------------------------------------------------------
 */
 
@@ -62,6 +52,7 @@ WHERE w.StatusPlatnosciID = 2
 AND NOT EXISTS (
     SELECT 1 FROM Platnosc p WHERE p.WizytaID = w.WizytaID
 );
+GO
 
 
 
@@ -69,11 +60,8 @@ AND NOT EXISTS (
 --------------------------------------------------------------------
 WIDOK: vw_WiecejNiz1Wizyta
 
-Identyfikuje pacjentów posiadających więcej niż jedną
-wizytę w tym samym miesiącu kalendarzowym.
-
-Widok pomocniczy wykorzystywany głównie
-podczas weryfikacji danych testowych.
+Pacjenci z więcej niż jedną wizytą w miesiącu, niezależnie
+od statusu. Kontrola założeń zbioru danych testowych.
 --------------------------------------------------------------------
 */
 
@@ -86,6 +74,7 @@ SELECT
 FROM Wizyta
 GROUP BY PacjentID, YEAR(DataWizyty), MONTH(DataWizyty)
 HAVING COUNT(*) > 1;
+GO
 
 
 
@@ -93,13 +82,12 @@ HAVING COUNT(*) > 1;
 --------------------------------------------------------------------
 WIDOK: vw_NiespojnoscStatusow
 
-Wykrywa niespójności logiczne pomiędzy statusem wizyty
-a statusem płatności.
-
-Kontrolowane przypadki obejmują m.in.:
-- wizytę zrealizowaną bez zarejestrowanej płatności
-- anulowaną wizytę stacjonarną z płatnością
-- anulowaną teleporadę bez zwrotu środków
+Wykrywa niedozwolone zestawienia identyfikatorów statusów:
+- wizyta zrealizowana z płatnością inną niż opłacona;
+- anulowana wizyta niebędąca teleporadą z płatnością
+  o statusie innym niż nieopłacona;
+- anulowana teleporada ze statusem innym niż zwrot.
+Widok sprawdza statusy, a nie istnienie rekordu Platnosc.
 --------------------------------------------------------------------
 */
 
@@ -112,6 +100,7 @@ WHERE
     (StatusWizytyID = 3 AND TypWizytyID <> 3 AND StatusPlatnosciID <> 1)
     OR
     (StatusWizytyID = 3 AND TypWizytyID = 3 AND StatusPlatnosciID <> 3);
+GO
 
 
 
@@ -119,8 +108,9 @@ WHERE
 --------------------------------------------------------------------
 WIDOK: vw_PlatnoscNiezgodnaZCennikiem
 
-Identyfikuje płatności, których kwota nie odpowiada
-wartości zdefiniowanej w tabeli Cennik dla danego typu wizyty.
+Płatności, których kwota różni się od bieżącej ceny typu
+wizyty. Kontrola przeznaczona dla niezmienianego cennika
+danych testowych; nie uwzględnia historycznych zmian cen.
 --------------------------------------------------------------------
 */
 
@@ -135,17 +125,13 @@ FROM Platnosc p
     JOIN Wizyta w ON p.WizytaID = w.WizytaID
     JOIN Cennik c ON w.TypWizytyID = c.TypWizytyID
 WHERE p.Kwota <> c.Kwota;
+GO
 
 
 
 /*
 ====================================================================
 II. WIDOKI ANALITYCZNE
-====================================================================
-
-Widoki wspierające analizę danych operacyjnych poradni.
-Umożliwiają raportowanie kliniczne, analizę aktywności
-lekarzy oraz monitorowanie przychodów.
 ====================================================================
 */
 
@@ -154,8 +140,8 @@ lekarzy oraz monitorowanie przychodów.
 --------------------------------------------------------------------
 WIDOK: vw_HistoriaKliniczna
 
-Agreguje historię rozpoznań medycznych pacjentów
-na podstawie diagnoz przypisanych do wizyt.
+Liczba rozpoznań danego kodu ICD-10 dla pacjenta oraz daty
+pierwszej i ostatniej wizyty z tym rozpoznaniem.
 --------------------------------------------------------------------
 */
 
@@ -174,6 +160,7 @@ FROM Diagnoza d
     JOIN Pacjent p ON w.PacjentID = p.PacjentID
     JOIN ICD10 i ON d.ICD10ID = i.ICD10ID
 GROUP BY p.PacjentID, p.Imie, p.Nazwisko, i.Kod, i.Nazwa;
+GO
 
 
 
@@ -181,9 +168,8 @@ GROUP BY p.PacjentID, p.Imie, p.Nazwisko, i.Kod, i.Nazwa;
 --------------------------------------------------------------------
 WIDOK: vw_HistoriaWizytPacjenta
 
-Szczegółowa historia wizyt pacjenta zawierająca
-informacje o lekarzu, specjalizacji, typie wizyty,
-statusie wizyty, diagnozie oraz płatności.
+Historia wizyt z lekarzem, specjalizacją, typem i statusem
+świadczenia oraz opcjonalną diagnozą i płatnością.
 --------------------------------------------------------------------
 */
 
@@ -201,18 +187,21 @@ SELECT
     sw.Nazwa AS StatusWizyty,
     i.Kod AS KodICD10,
     i.Nazwa AS Diagnoza,
-    pl.Kwota
+    pl.Kwota,
+	sp.Nazwa AS StatusPlatnosci,
+	pl.DataPlatnosci
 FROM Wizyta w
     JOIN Pacjent p ON w.PacjentID = p.PacjentID
     JOIN Lekarz l ON w.LekarzID = l.LekarzID
     JOIN Uzytkownik u ON l.UzytkownikID = u.UzytkownikID
-    LEFT JOIN LekarzSpecjalizacja ls ON l.LekarzID = ls.LekarzID
-    LEFT JOIN Specjalizacja s ON ls.SpecjalizacjaID = s.SpecjalizacjaID
+    JOIN Specjalizacja s ON w.SpecjalizacjaID = s.SpecjalizacjaID
     JOIN TypWizyty tw ON w.TypWizytyID = tw.TypWizytyID
     JOIN StatusWizyty sw ON w.StatusWizytyID = sw.StatusWizytyID
     LEFT JOIN Diagnoza d ON w.WizytaID = d.WizytaID
     LEFT JOIN ICD10 i ON d.ICD10ID = i.ICD10ID
-    LEFT JOIN Platnosc pl ON w.WizytaID = pl.WizytaID;
+    LEFT JOIN Platnosc pl ON w.WizytaID = pl.WizytaID
+	JOIN StatusPlatnosci sp ON w.StatusPlatnosciID = sp.StatusPlatnosciID;
+GO
 
 
 
@@ -220,9 +209,8 @@ FROM Wizyta w
 --------------------------------------------------------------------
 WIDOK: vw_GrafikLekarza
 
-Harmonogram wizyt lekarzy zawierający
-podstawowe informacje o pacjentach
-oraz typie i statusie wizyty.
+Terminy wizyt lekarzy z danymi pacjentów, typem i statusem
+wizyty; obejmuje także wizyty anulowane i umówione.
 --------------------------------------------------------------------
 */
 
@@ -241,11 +229,11 @@ SELECT
 FROM Wizyta w
     JOIN Lekarz l ON w.LekarzID = l.LekarzID
     JOIN Uzytkownik u ON l.UzytkownikID = u.UzytkownikID
-    LEFT JOIN LekarzSpecjalizacja ls ON l.LekarzID = ls.LekarzID
-    LEFT JOIN Specjalizacja s ON ls.SpecjalizacjaID = s.SpecjalizacjaID
+    JOIN Specjalizacja s ON w.SpecjalizacjaID = s.SpecjalizacjaID
     JOIN Pacjent p ON w.PacjentID = p.PacjentID
     JOIN TypWizyty tw ON w.TypWizytyID = tw.TypWizytyID
     JOIN StatusWizyty sw ON w.StatusWizytyID = sw.StatusWizytyID;
+GO
 
 
 
@@ -253,8 +241,9 @@ FROM Wizyta w
 --------------------------------------------------------------------
 WIDOK: vw_OblozenieLekarzy
 
-Agreguje liczbę zrealizowanych wizyt
-oraz wygenerowany przychód dla każdego lekarza.
+Liczba zrealizowanych wizyt i suma przypisanych do nich kwot
+dla każdego lekarza, również bez zrealizowanych wizyt.
+Brak filtra daty płatności.
 --------------------------------------------------------------------
 */
 
@@ -264,13 +253,14 @@ SELECT
     u.Imie,
     u.Nazwisko,
     COUNT(w.WizytaID) AS LiczbaWizyt,
-    SUM(p.Kwota) AS Przychod
+    COALESCE(SUM(p.Kwota), 0) AS Przychod
 FROM Lekarz l
     JOIN Uzytkownik u ON l.UzytkownikID = u.UzytkownikID
     LEFT JOIN Wizyta w ON l.LekarzID = w.LekarzID
     AND w.StatusWizytyID = 2
     LEFT JOIN Platnosc p ON w.WizytaID = p.WizytaID
 GROUP BY l.LekarzID, u.Imie, u.Nazwisko;
+GO
 
 
 
@@ -278,22 +268,23 @@ GROUP BY l.LekarzID, u.Imie, u.Nazwisko;
 --------------------------------------------------------------------
 WIDOK: vw_RaportPrzychodow
 
-Agregacja przychodów poradni
-w podziale na miesiące kalendarzowe.
+Przychód miesięczny z płatności dotyczących wizyt
+zrealizowanych, grupowany według daty płatności.
 --------------------------------------------------------------------
 */
 
 CREATE VIEW vw_RaportPrzychodow AS
 SELECT
-    YEAR(w.DataWizyty) AS Rok,
-    MONTH(w.DataWizyty) AS Miesiac,
+    YEAR(p.DataPlatnosci) AS Rok,
+    MONTH(p.DataPlatnosci) AS Miesiac,
     SUM(p.Kwota) AS Przychod
 FROM Platnosc p
     JOIN Wizyta w ON p.WizytaID = w.WizytaID
 WHERE w.StatusWizytyID = 2
 GROUP BY
-    YEAR(w.DataWizyty),
-    MONTH(w.DataWizyty);
+    YEAR(p.DataPlatnosci),
+    MONTH(p.DataPlatnosci);
+GO
 
 
 
@@ -301,15 +292,15 @@ GROUP BY
 --------------------------------------------------------------------
 WIDOK: vw_PrzychodyLekarzy
 
-Miesięczna agregacja przychodów generowanych
-przez poszczególnych lekarzy.
+Przychód miesięczny według lekarza i daty płatności;
+uwzględnia wyłącznie wizyty zrealizowane.
 --------------------------------------------------------------------
 */
 
 CREATE VIEW vw_PrzychodyLekarzy AS
 SELECT
-    YEAR(w.DataWizyty) AS Rok,
-    MONTH(w.DataWizyty) AS Miesiac,
+    YEAR(p.DataPlatnosci) AS Rok,
+    MONTH(p.DataPlatnosci) AS Miesiac,
     l.LekarzID,
     u.Imie,
     u.Nazwisko,
@@ -320,11 +311,12 @@ FROM Platnosc p
     JOIN Uzytkownik u ON l.UzytkownikID = u.UzytkownikID
 WHERE w.StatusWizytyID = 2
 GROUP BY
-    YEAR(w.DataWizyty),
-    MONTH(w.DataWizyty),
+    YEAR(p.DataPlatnosci),
+    MONTH(p.DataPlatnosci),
     l.LekarzID,
     u.Imie,
     u.Nazwisko;
+GO
 
 
 
@@ -332,8 +324,8 @@ GROUP BY
 --------------------------------------------------------------------
 WIDOK: vw_NajczestszeDiagnozy
 
-Ranking najczęściej rejestrowanych
-rozpoznań medycznych (ICD-10).
+Liczba wystąpień poszczególnych rozpoznań ICD-10.
+Widok nie ogranicza wyników do określonej liczby pozycji.
 --------------------------------------------------------------------
 */
 
@@ -347,6 +339,7 @@ FROM Diagnoza d
 GROUP BY
     i.Kod,
     i.Nazwa;
+GO
 
 
 
@@ -354,11 +347,10 @@ GROUP BY
 --------------------------------------------------------------------
 WIDOK: vw_FactWizyty
 
-Zdenormalizowany widok analityczny integrujący
-kluczowe dane operacyjne systemu.
-
-Pełni rolę tabeli faktów w modelu raportowym
-wykorzystywanym w narzędziach BI.
+Jeden wiersz na wizytę: identyfikatory wymiarów, statusy,
+daty, rozpoznanie oraz kwota i data płatności.
+LEFT JOIN zachowuje wizyty bez diagnozy lub płatności.
+Źródło tabeli FactWizyta w modelu Power BI.
 --------------------------------------------------------------------
 */
 
@@ -370,24 +362,32 @@ SELECT
     MONTH(w.DataWizyty) AS Miesiac,
     DAY(w.DataWizyty) AS Dzien,
     p.PacjentID,
-    p.Imie AS PacjentImie,
-    p.Nazwisko AS PacjentNazwisko,
     p.Plec,
     l.LekarzID,
     u.Imie AS LekarzImie,
     u.Nazwisko AS LekarzNazwisko,
+	w.SpecjalizacjaID,
+	s.Nazwa AS Specjalizacja,
+	w.TypWizytyID,
     tw.Nazwa AS TypWizyty,
+	w.StatusWizytyID,
     sw.Nazwa AS StatusWizyty,
+	d.ICD10ID,
     icd.Kod AS KodICD10,
     icd.Nazwa AS NazwaICD10,
-    pl.Kwota
+    pl.Kwota,
+	pl.DataPlatnosci,
+	w.StatusPlatnosciID,
+	sp.Nazwa AS StatusPlatnosci
 FROM Wizyta w
     JOIN Pacjent p ON w.PacjentID = p.PacjentID
     JOIN Lekarz l ON w.LekarzID = l.LekarzID
     JOIN Uzytkownik u ON l.UzytkownikID = u.UzytkownikID
+	JOIN Specjalizacja s ON w.SpecjalizacjaID = s.SpecjalizacjaID
     JOIN TypWizyty tw ON w.TypWizytyID = tw.TypWizytyID
     JOIN StatusWizyty sw ON w.StatusWizytyID = sw.StatusWizytyID
     LEFT JOIN Diagnoza d ON w.WizytaID = d.WizytaID
     LEFT JOIN ICD10 icd ON d.ICD10ID = icd.ICD10ID
     LEFT JOIN Platnosc pl ON w.WizytaID = pl.WizytaID
-WHERE w.StatusWizytyID = 2;
+	JOIN StatusPlatnosci sp ON w.StatusPlatnosciID = sp.StatusPlatnosciID;
+GO

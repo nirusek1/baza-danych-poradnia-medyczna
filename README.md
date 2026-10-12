@@ -3,6 +3,6 @@ Projekt i implementacja bazy danych prywatnej poradni specjalistycznej
 
 
 
-## Diagram bazy danych
+## Diagram bazy danych 
 
 ![ER Diagram](diagrams/erd.png)

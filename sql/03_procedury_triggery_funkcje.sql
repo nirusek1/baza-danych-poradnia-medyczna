@@ -32,51 +32,70 @@ CREATE PROCEDURE sp_DodajPlatnosc
     @WizytaID INT
 AS
 BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
 
-IF NOT EXISTS (
-    SELECT 1
-    FROM Wizyta
-    WHERE WizytaID = @WizytaID
-)
-    THROW 50001, 'Wizyta o podanym ID nie istnieje.', 1;
+    BEGIN TRY
+        BEGIN TRANSACTION;
 
-IF EXISTS (
-    SELECT 1
-    FROM Platnosc
-    WHERE WizytaID = @WizytaID
-)
-    THROW 50002, 'Platnosc dla tej wizyty juz istnieje.', 1;
+        IF NOT EXISTS (
+            SELECT 1
+            FROM Wizyta
+            WHERE WizytaID = @WizytaID
+        )
+            THROW 50001, 'Wizyta o podanym ID nie istnieje.', 1;
 
-IF EXISTS (
-    SELECT 1
-    FROM Wizyta
-    WHERE WizytaID = @WizytaID
-      AND StatusWizytyID <> 2
-)
-    THROW 50003, 'Platnosc mozna dodac tylko dla wizyty zrealizowanej.', 1;
+        IF EXISTS (
+            SELECT 1
+            FROM Platnosc
+            WHERE WizytaID = @WizytaID
+        )
+            THROW 50002, 'Platnosc dla tej wizyty juz istnieje.', 1;
 
-IF NOT EXISTS (
-    SELECT 1
-    FROM Wizyta w
-        JOIN Cennik c
-            ON w.TypWizytyID = c.TypWizytyID
-    WHERE w.WizytaID = @WizytaID
-)
-    THROW 50004, 'Brak ceny dla typu wskazanej wizyty.', 1;
+        IF EXISTS (
+            SELECT 1
+            FROM Wizyta
+            WHERE WizytaID = @WizytaID
+              AND StatusWizytyID <> 2
+        )
+            THROW 50003, 'Platnosc mozna dodac tylko dla wizyty zrealizowanej.', 1;
 
-INSERT INTO Platnosc (WizytaID, Kwota, DataPlatnosci)
-SELECT 
-    w.WizytaID,
-    c.Kwota,
-	GETDATE()
-FROM Wizyta w
-    JOIN Cennik c ON w.TypWizytyID = c.TypWizytyID
-WHERE w.WizytaID = @WizytaID;
+        IF NOT EXISTS (
+            SELECT 1
+            FROM Wizyta w
+                JOIN Cennik c
+                    ON w.TypWizytyID = c.TypWizytyID
+            WHERE w.WizytaID = @WizytaID
+        )
+            THROW 50004, 'Brak ceny dla wskazanego typu wizyty.', 1;
 
-UPDATE Wizyta
-SET StatusPlatnosciID = 2
-WHERE WizytaID = @WizytaID;
+        INSERT INTO Platnosc (WizytaID, Kwota, DataPlatnosci)
+        SELECT
+            w.WizytaID,
+            c.Kwota,
+            GETDATE()
+        FROM Wizyta w
+            JOIN Cennik c ON w.TypWizytyID = c.TypWizytyID
+        WHERE w.WizytaID = @WizytaID;
 
+        IF @@ROWCOUNT <> 1
+            THROW 50023, 'Nie udalo sie dodac platnosci do wizyty.', 1;
+
+        UPDATE Wizyta
+        SET StatusPlatnosciID = 2
+        WHERE WizytaID = @WizytaID;
+
+        IF @@ROWCOUNT <> 1
+            THROW 50024, 'Nie udalo sie zaktualizowac statusu platnosci.', 1;
+
+        COMMIT TRANSACTION;
+    END TRY
+    BEGIN CATCH
+        IF XACT_STATE() <> 0
+            ROLLBACK TRANSACTION;
+
+        THROW;
+    END CATCH;
 END;
 GO
 
@@ -146,94 +165,110 @@ dodaje przedpłatę i nadaje status płatności opłacona.
 CREATE PROCEDURE sp_ZarejestrujWizyte
     @PacjentID INT,
     @LekarzID INT,
-	@SpecjalizacjaID INT,
+    @SpecjalizacjaID INT,
     @DataWizyty DATETIME2(0),
     @TypWizytyID INT
 AS
 BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
 
-DECLARE @DataUtworzenia DATETIME2(0) = GETDATE();
-DECLARE @WizytaID INT;
+    DECLARE @DataUtworzenia DATETIME2(0) = GETDATE();
+    DECLARE @WizytaID INT;
 
-IF NOT EXISTS (
-    SELECT 1
-    FROM Pacjent
-    WHERE PacjentID = @PacjentID
-)
-    THROW 50009, 'Pacjent o podanym ID nie istnieje.', 1;
+    BEGIN TRY
+        BEGIN TRANSACTION;
 
-IF NOT EXISTS (
-    SELECT 1
-    FROM Lekarz
-    WHERE LekarzID = @LekarzID
-)
-    THROW 50010, 'Lekarz o podanym ID nie istnieje.', 1;
+        IF NOT EXISTS (
+            SELECT 1
+            FROM Pacjent
+            WHERE PacjentID = @PacjentID
+        )
+            THROW 50009, 'Pacjent o podanym ID nie istnieje.', 1;
 
-IF NOT EXISTS (
-	SELECT 1
-	FROM LekarzSpecjalizacja
-	WHERE LekarzID = @LekarzID
-		AND SpecjalizacjaID = @SpecjalizacjaID
-)
-	THROW 50011, 'Lekarz nie posiada wskazanej specjalizacji.', 1;
+        IF NOT EXISTS (
+            SELECT 1
+            FROM Lekarz
+            WHERE LekarzID = @LekarzID
+        )
+            THROW 50010, 'Lekarz o podanym ID nie istnieje.', 1;
 
-IF NOT EXISTS (
-    SELECT 1
-    FROM TypWizyty
-    WHERE TypWizytyID = @TypWizytyID
-)
-    THROW 50012, 'Typ wizyty o podanym ID nie istnieje.', 1;
+        IF NOT EXISTS (
+            SELECT 1
+            FROM LekarzSpecjalizacja
+            WHERE LekarzID = @LekarzID
+              AND SpecjalizacjaID = @SpecjalizacjaID
+        )
+            THROW 50011, 'Lekarz nie posiada wskazanej specjalizacji.', 1;
 
-IF NOT EXISTS (
-    SELECT 1
-    FROM Cennik
-    WHERE TypWizytyID = @TypWizytyID
-)
-    THROW 50004, 'Brak ceny dla wskazanego typu wizyty.', 1;
+        IF NOT EXISTS (
+            SELECT 1
+            FROM TypWizyty
+            WHERE TypWizytyID = @TypWizytyID
+        )
+            THROW 50012, 'Typ wizyty o podanym ID nie istnieje.', 1;
 
-IF @DataWizyty <= @DataUtworzenia
-    THROW 50013, 'Nieprawidlowa data wizyty.', 1;
+        IF NOT EXISTS (
+            SELECT 1
+            FROM Cennik
+            WHERE TypWizytyID = @TypWizytyID
+        )
+            THROW 50004, 'Brak ceny dla wskazanego typu wizyty.', 1;
 
-IF EXISTS (
-    SELECT 1
-    FROM Wizyta
-    WHERE LekarzID = @LekarzID
-      AND DataWizyty = @DataWizyty
-)
-    THROW 50014, 'Lekarz ma juz zaplanowana wizyte w tym terminie.', 1;
+        IF @DataWizyty IS NULL OR @DataWizyty <= @DataUtworzenia
+			THROW 50013, 'Nieprawidlowa data wizyty.', 1;
 
-INSERT INTO Wizyta
-(PacjentID, LekarzID, SpecjalizacjaID, DataWizyty, DataUtworzenia, StatusWizytyID, StatusPlatnosciID, TypWizytyID)
-VALUES
-(@PacjentID, 
-@LekarzID,
-@SpecjalizacjaID,
-@DataWizyty, 
-@DataUtworzenia, 
-1, 
-CASE 
-    WHEN @TypWizytyID = 3 THEN 2
-    ELSE 1
-END, 
-@TypWizytyID);
+        IF EXISTS (
+            SELECT 1
+            FROM Wizyta
+            WHERE LekarzID = @LekarzID
+              AND DataWizyty = @DataWizyty
+        )
+            THROW 50014, 'Lekarz ma juz zaplanowana wizyte w tym terminie.', 1;
 
-SET @WizytaID = SCOPE_IDENTITY();
+        INSERT INTO Wizyta
+        (PacjentID, LekarzID, SpecjalizacjaID, DataWizyty, DataUtworzenia, StatusWizytyID, StatusPlatnosciID, TypWizytyID)
+        VALUES
+        (@PacjentID,
+         @LekarzID,
+         @SpecjalizacjaID,
+         @DataWizyty,
+         @DataUtworzenia,
+         1,
+         CASE
+             WHEN @TypWizytyID = 3 THEN 2
+             ELSE 1
+         END,
+         @TypWizytyID);
 
-IF @TypWizytyID = 3
-BEGIN
-    INSERT INTO Platnosc (
-        WizytaID,
-        Kwota,
-        DataPlatnosci
-    )
-    SELECT
-        @WizytaID,
-        Kwota,
-        @DataUtworzenia
-    FROM Cennik
-    WHERE TypWizytyID = @TypWizytyID;
-END;
+        SET @WizytaID = SCOPE_IDENTITY();
 
+        IF @TypWizytyID = 3
+        BEGIN
+            INSERT INTO Platnosc (
+                WizytaID,
+                Kwota,
+                DataPlatnosci
+            )
+            SELECT
+                @WizytaID,
+                Kwota,
+                @DataUtworzenia
+            FROM Cennik
+            WHERE TypWizytyID = @TypWizytyID;
+
+            IF @@ROWCOUNT <> 1
+                THROW 50023, 'Nie udalo sie dodac platnosci do wizyty.', 1;
+        END;
+
+        COMMIT TRANSACTION;
+    END TRY
+    BEGIN CATCH
+        IF XACT_STATE() <> 0
+            ROLLBACK TRANSACTION;
+
+        THROW;
+    END CATCH;
 END;
 GO
 
@@ -296,12 +331,93 @@ GO
 
 /*
 --------------------------------------------------------------------
+PROCEDURA: sp_ZrealizujWizyte
+--------------------------------------------------------------------
+
+Potwierdza realizację wizyty umówionej po nadejściu jej terminu
+oraz zapisuje diagnozę ICD-10 w jednej transakcji.
+Zgodność diagnozy ze specjalizacją i statusem wizyty kontrolują
+triggery tabeli Diagnoza.
+--------------------------------------------------------------------
+*/
+
+CREATE PROCEDURE sp_ZrealizujWizyte
+    @WizytaID INT,
+    @ICD10ID INT,
+    @OpisDodatkowy NVARCHAR(500) = NULL
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+
+    DECLARE @StatusWizytyID INT;
+    DECLARE @DataWizyty DATETIME2(0);
+
+    BEGIN TRY
+        BEGIN TRANSACTION;
+
+        SELECT
+            @StatusWizytyID = StatusWizytyID,
+            @DataWizyty = DataWizyty
+        FROM Wizyta WITH (UPDLOCK, HOLDLOCK)
+        WHERE WizytaID = @WizytaID;
+
+        IF @StatusWizytyID IS NULL
+            THROW 50001, 'Wizyta o podanym ID nie istnieje.', 1;
+
+        IF @StatusWizytyID <> 1
+            THROW 50020, 'Zrealizowac mozna tylko wizyte umowiona.', 1;
+
+        IF @DataWizyty > SYSDATETIME()
+            THROW 50021, 'Nie mozna zrealizowac wizyty przed jej terminem.', 1;
+
+        IF NOT EXISTS (
+            SELECT 1
+            FROM ICD10
+            WHERE ICD10ID = @ICD10ID
+        )
+            THROW 50025, 'Wskazany kod ICD10 nie istnieje.', 1;
+
+        UPDATE Wizyta
+        SET StatusWizytyID = 2
+        WHERE WizytaID = @WizytaID
+          AND StatusWizytyID = 1
+          AND DataWizyty <= SYSDATETIME();
+
+        IF @@ROWCOUNT <> 1
+            THROW 50022, 'Nie udalo sie zmienic statusu wizyty.', 1;
+
+        INSERT INTO Diagnoza (WizytaID, ICD10ID, OpisDodatkowy)
+        VALUES (@WizytaID, @ICD10ID, @OpisDodatkowy);
+
+        IF @@ROWCOUNT <> 1
+            THROW 50026, 'Nie udalo sie dodac diagnozy do wizyty.', 1;
+
+        COMMIT TRANSACTION;
+    END TRY
+    BEGIN CATCH
+        IF XACT_STATE() <> 0
+            ROLLBACK TRANSACTION;
+
+        THROW;
+    END CATCH;
+END;
+GO
+
+
+
+/*
+--------------------------------------------------------------------
 PROCEDURA: sp_SprawdzDostepnoscLekarza
 --------------------------------------------------------------------
 
-Zwraca dostępność terminu na podstawie istnienia dowolnej
-wizyty lekarza o wskazanej dacie i godzinie.
-Anulowane wizyty również oznaczają termin jako zajęty.
+Sprawdza istnienie lekarza oraz dostępność przyszłego terminu.
+Brak daty zgłasza jako błąd 50013. Pozostałe wyniki zwraca
+zgodnie z zasadami tabeli Wizyta: dni robocze (pon.–pt.),
+godziny rozpoczęcia 08:00–15:30 i interwał 30 minut.
+Zajętość uwzględnia wszystkie wizyty, także anulowane,
+zgodnie z ograniczeniem UNIQUE(LekarzID, DataWizyty).
+Nie uwzględnia indywidualnych grafików lekarzy..
 --------------------------------------------------------------------
 */
 
@@ -310,27 +426,48 @@ CREATE PROCEDURE sp_SprawdzDostepnoscLekarza
     @DataWizyty DATETIME2(0)
 AS
 BEGIN
+    SET NOCOUNT ON;
 
-IF NOT EXISTS (
-    SELECT 1
-    FROM Lekarz
-    WHERE LekarzID = @LekarzID
-)
-    THROW 50010, 'Lekarz o podanym ID nie istnieje.', 1;
+    IF NOT EXISTS (
+        SELECT 1
+        FROM Lekarz
+        WHERE LekarzID = @LekarzID
+    )
+        THROW 50010, 'Lekarz o podanym ID nie istnieje.', 1;
 
-SELECT
-    CASE
-        WHEN EXISTS (
-            SELECT 1
-            FROM Wizyta
-            WHERE LekarzID = @LekarzID AND DataWizyty = @DataWizyty
-        )
-        THEN 'Termin zajęty'
-        ELSE 'Termin dostępny'
-    END AS Status;
+    IF @DataWizyty IS NULL
+        THROW 50013, 'Nieprawidlowa data wizyty.', 1;
 
+    SELECT
+        CASE
+            WHEN @DataWizyty <= SYSDATETIME()
+                THEN N'Termin w przeszłości'
+
+            -- Niezależnie od ustawienia DATEFIRST: 1900-01-01 był poniedziałkiem.
+            WHEN DATEDIFF(DAY, '19000101', CAST(@DataWizyty AS DATE)) % 7
+                 NOT BETWEEN 0 AND 4
+                THEN N'Termin poza dniami pracy'
+
+            WHEN DATEPART(HOUR, @DataWizyty) NOT BETWEEN 8 AND 15
+                THEN N'Termin poza godzinami pracy'
+
+            WHEN DATEPART(MINUTE, @DataWizyty) NOT IN (0, 30)
+                 OR DATEPART(SECOND, @DataWizyty) <> 0
+                THEN N'Nieprawidłowy interwał terminu'
+
+            WHEN EXISTS (
+                SELECT 1
+                FROM Wizyta
+                WHERE LekarzID = @LekarzID
+                  AND DataWizyty = @DataWizyty
+            )
+                THEN N'Termin zajęty'
+
+            ELSE N'Termin dostępny'
+        END AS Status;
 END;
 GO
+
 
 
 

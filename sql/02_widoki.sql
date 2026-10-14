@@ -82,24 +82,51 @@ GO
 --------------------------------------------------------------------
 WIDOK: vw_NiespojnoscStatusow
 
-Wykrywa niedozwolone zestawienia identyfikatorów statusów:
-- wizyta zrealizowana z płatnością inną niż opłacona;
-- anulowana wizyta niebędąca teleporadą z płatnością
-  o statusie innym niż nieopłacona;
-- anulowana teleporada ze statusem innym niż zwrot.
-Widok sprawdza statusy, a nie istnienie rekordu Platnosc.
+Identyfikuje kombinacje statusów niezgodne z modelem rozliczeń:
+- umówiona konsultacja lub kontrola musi byc nieopłacona;
+- umówiona teleporada musi byc opłacona (przedpłata);
+- zrealizowana wizyta nie moze miec statusu zwrot;
+- anulowana konsultacja lub kontrola  musi byc nieopłacona;
+- anulowana teleporada musi miec status zwrot.
+Zrealizowana konsultacja lub kontrola może oczekiwać na płatność.
 --------------------------------------------------------------------
 */
 
-CREATE VIEW vw_NiespojnoscStatusow AS
+CREATE VIEW dbo.vw_NiespojnoscStatusow AS
 SELECT *
-FROM Wizyta
+FROM dbo.Wizyta
 WHERE
-    (StatusWizytyID = 2 AND StatusPlatnosciID <> 2)
+    -- Umowiona konsultacja lub kontrola musi byc nieoplacona
+    (StatusWizytyID = 1
+     AND TypWizytyID <> 3
+     AND StatusPlatnosciID <> 1)
+
     OR
-    (StatusWizytyID = 3 AND TypWizytyID <> 3 AND StatusPlatnosciID <> 1)
+
+    -- Umowiona teleporada musi byc oplacona
+    (StatusWizytyID = 1
+     AND TypWizytyID = 3
+     AND StatusPlatnosciID <> 2)
+
     OR
-    (StatusWizytyID = 3 AND TypWizytyID = 3 AND StatusPlatnosciID <> 3);
+
+    -- Zrealizowana wizyta nie moze miec statusu zwrot
+    (StatusWizytyID = 2
+     AND StatusPlatnosciID = 3)
+
+    OR
+
+    -- Anulowana konsultacja lub kontrola musi byc nieoplacona
+    (StatusWizytyID = 3
+     AND TypWizytyID <> 3
+     AND StatusPlatnosciID <> 1)
+
+    OR
+
+    -- Anulowana teleporada musi miec status zwrot
+    (StatusWizytyID = 3
+     AND TypWizytyID = 3
+     AND StatusPlatnosciID <> 3);
 GO
 
 
